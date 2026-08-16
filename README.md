@@ -130,26 +130,6 @@ Results for: "what did they say about gold?"
 The menu loops until you choose **3** (or type `q`). If nothing matches, it prints
 `No matches found.`
 
-### Scripted CLIs (alternative)
-
-Ingest a file by passing its path:
-
-```bash
-.venv/bin/python run_ingest.py data/input/your_file.mp4
-```
-
-Ask a question by passing it as an argument (wrap it in quotes); `--k` controls how
-many results to return (default 3):
-
-```bash
-.venv/bin/python ask.py "what did they say about gold?"
-.venv/bin/python ask.py "did they mention the dividend?" --k 5
-```
-
-Both scripts and the interactive menu share the same pipeline, so behavior is
-identical. Re-ingesting the same file **replaces** its previous data rather than
-duplicating it, so it's always safe to re-run.
-
 ## Project layout
 
 ```
@@ -169,12 +149,3 @@ data/
   media/           extracted WAVs + cached transcripts
 db/chroma/         persistent vector store
 ```
-
-## Notes
-
-- Chunking is currently a crude fixed ~30-second window; topic-based segmentation is
-  planned for a later phase.
-- The vector store uses **cosine distance**, so similarity scores are bounded 0–2
-  (0 = identical meaning, 2 = opposite).
-- Transcripts are cached as `data/media/{name}_words.json`, so re-ingesting a file
-  skips the slow transcription step.

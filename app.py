@@ -18,14 +18,34 @@ def _fmt_ms(ms):
     return f"{total_seconds // 60:02d}:{total_seconds % 60:02d}"
 
 
+def _clean_path(raw):
+    """Normalize a pasted/dragged path into an absolute Path.
+
+    Accepts any absolute or relative path anywhere on the system and tidies up
+    the forms terminals produce: surrounding quotes, backslash-escaped spaces,
+    a leading `~`, and stray whitespace. Relative paths resolve against the
+    current working directory.
+    """
+    raw = raw.strip()
+
+    # Strip a matching pair of surrounding quotes (common when pasting).
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ("'", '"'):
+        raw = raw[1:-1]
+
+    # Un-escape backslash-escaped characters (e.g. dragged-in "my\ file.mp4").
+    raw = raw.replace("\\ ", " ").replace("\\", "")
+
+    return Path(raw).expanduser().resolve()
+
+
 def do_ingest():
     """Prompt for a media file and run the full ingest pipeline."""
-    raw = input("Path to the video/audio file: ").strip()
+    raw = input("Path to the video/audio file (any location on your system): ").strip()
     if not raw:
         print("No path entered.\n")
         return
 
-    path = Path(raw).expanduser()
+    path = _clean_path(raw)
     if not path.is_file():
         print(f"File not found: {path}\n")
         return
