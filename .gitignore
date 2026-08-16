@@ -1,0 +1,31 @@
+# --- Python ---------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# --- Virtualenv -----------------------------------------------------------
+.venv/
+venv/
+
+# --- Generated data (media, transcripts, clips) ---------------------------
+# Keep the folder structure (via .gitkeep) but ignore their contents.
+data/input/*
+data/media/*
+data/clips/*
+data/frames/*
+!data/**/.gitkeep
+
+# --- Vector store (persistent Chroma DB) ----------------------------------
+db/chroma/*
+!db/chroma/.gitkeep
+
+# --- macOS ----------------------------------------------------------------
+.DS_Store
+
+# --- Editor / IDE ---------------------------------------------------------
+.idea/
+.vscode/
+
+# --- Claude Code (tooling, not part of the project) -----------------------
+.claude

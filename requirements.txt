@@ -1,0 +1,5 @@
+certifi
+ffmpeg-python
+whisperx
+ollama
+chromadb
