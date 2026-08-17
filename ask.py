@@ -33,7 +33,8 @@ def main():
     for rank, hit in enumerate(results, start=1):
         time_range = f"{_fmt_ms(hit['start_ms'])}-{_fmt_ms(hit['end_ms'])}"
         print(f"[{rank}] {time_range}  ({hit['media_file']})")
-        print(f"    {hit['text']}\n")
+        print(f"    {hit['text']}")
+        print(f"    Clip: {hit['clip_path']}\n")
 
 
 if __name__ == "__main__":
