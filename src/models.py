@@ -1,10 +1,5 @@
-"""Thin wrappers around the ML models used by the POC.
-
-Each function is a single, self-contained call to one model so the rest of the
-codebase depends on these signatures rather than on WhisperX / sentence-
-transformers / Ollama directly. This is the one place to change when swapping a
-local model for a hosted API.
-"""
+"""Model wrappers (WhisperX ASR, Ollama embeddings). The one place to swap a
+local model for a hosted API."""
 
 import json
 from functools import lru_cache
@@ -15,7 +10,7 @@ from . import config
 
 @lru_cache(maxsize=1)
 def _asr_model():
-    """Load and cache the WhisperX transcription model (lazy, once)."""
+    """Load the WhisperX model once per process."""
     import whisperx
 
     return whisperx.load_model(
@@ -26,14 +21,10 @@ def _asr_model():
 
 
 def asr(audio_path):
-    """Transcribe audio and return a flat list of word-level timestamps.
+    """Transcribe audio to word-level timestamps.
 
-    Runs WhisperX transcription followed by forced alignment so every word
-    gets its own start/end. Returns a list of dicts:
-        [{"word": str, "start_ms": int, "end_ms": int}, ...]
-
-    Results are cached to {basename}_words.json next to the audio, since
-    reloading WhisperX is slow; a cached file is loaded verbatim.
+    Returns [{"word": str, "start_ms": int, "end_ms": int}, ...], cached to
+    {basename}_words.json and loaded verbatim if present.
     """
     audio_path = Path(audio_path)
     cache_path = config.DATA_MEDIA / f"{audio_path.stem}_words.json"
@@ -46,9 +37,9 @@ def asr(audio_path):
 
     model = _asr_model()
     audio = whisperx.load_audio(str(audio_path))
-    result = model.transcribe(audio, batch_size=16)
+    result = model.transcribe(audio, batch_size=8)
 
-    # Forced alignment: turns segment-level output into word-level timestamps.
+    # Forced alignment turns segment-level output into per-word timestamps.
     align_model, metadata = whisperx.load_align_model(
         language_code=result["language"], device=config.DEVICE
     )
@@ -59,8 +50,7 @@ def asr(audio_path):
     words = []
     for segment in aligned["segments"]:
         for w in segment.get("words", []):
-            # Some tokens (e.g. digits/punctuation) can't be aligned and lack
-            # timestamps; skip them so every entry has valid integer ms.
+            # Unalignable tokens (some digits/punctuation) lack timestamps.
             if "start" not in w or "end" not in w:
                 continue
             words.append(
@@ -77,18 +67,22 @@ def asr(audio_path):
     return words
 
 
-def embed(texts):
-    """Embed a list of strings into a list of vectors via Ollama.
+def embed(texts, is_query=False):
+    """Embed strings via Ollama (one call each). Requires `ollama serve`.
 
-    Ollama's embeddings endpoint takes one text at a time, so we loop. Assumes
-    `ollama serve` is running locally. Raises a clear error if a call fails.
+    mxbai-embed-large is asymmetric: pass is_query=True for search queries so
+    the instruction prefix is applied; documents get no prefix.
     """
     import ollama
+
+    prefix = config.EMBED_QUERY_PREFIX if is_query else ""
 
     vectors = []
     for text in texts:
         try:
-            response = ollama.embeddings(model=config.EMBED_MODEL, prompt=text)
+            response = ollama.embeddings(
+                model=config.EMBED_MODEL, prompt=f"{prefix}{text}"
+            )
         except Exception as e:
             raise RuntimeError(
                 f"Ollama embedding call failed for model '{config.EMBED_MODEL}' "
@@ -104,5 +98,5 @@ def llm(prompt):
 
 
 def vision(image_path, prompt):
-    """Describe/answer about an image with the local vision model. Wired up later."""
+    """Answer about an image with the local vision model. Wired up later."""
     raise NotImplementedError

@@ -64,7 +64,7 @@ fi
 
 # --- 4. Ollama (system tool) + embedding model ----------------------------
 step "4. Ollama + embedding model"
-EMBED_MODEL="nomic-embed-text"
+EMBED_MODEL="mxbai-embed-large"
 if ! command -v ollama >/dev/null 2>&1; then
     fail "ollama not found — install it from https://ollama.com/download"
     READY=0

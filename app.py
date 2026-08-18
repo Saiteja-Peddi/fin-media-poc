@@ -1,8 +1,4 @@
-"""Interactive entry point for the fin-media POC.
-
-Presents a menu — transcribe/ingest a file, or ask a question — and prompts for
-the file path or question based on the choice. Wraps the same pipeline the
-scripted CLIs (run_ingest.py, ask.py) use.
+"""Interactive menu for the POC: ingest files or ask questions.
 
     python app.py
 """
@@ -11,7 +7,7 @@ from pathlib import Path
 
 from src import config, ingest, models, query, store
 
-# Media extensions the batch scanner will pick up from data/input.
+# Extensions the folder scanner picks up from data/input.
 MEDIA_EXTENSIONS = {
     ".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".flv",   # video
     ".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".opus",  # audio
@@ -25,30 +21,25 @@ def _fmt_ms(ms):
 
 
 def _clean_path(raw):
-    """Normalize a pasted/dragged path into an absolute Path.
-
-    Accepts any absolute or relative path anywhere on the system and tidies up
-    the forms terminals produce: surrounding quotes, backslash-escaped spaces,
-    a leading `~`, and stray whitespace. Relative paths resolve against the
-    current working directory.
-    """
+    """Normalize a pasted/dragged path (quotes, escaped spaces, ~) to an
+    absolute Path."""
     raw = raw.strip()
 
-    # Strip a matching pair of surrounding quotes (common when pasting).
     if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ("'", '"'):
         raw = raw[1:-1]
-
-    # Un-escape backslash-escaped characters (e.g. dragged-in "my\ file.mp4").
     raw = raw.replace("\\ ", " ").replace("\\", "")
 
     return Path(raw).expanduser().resolve()
 
 
 def _run_pipeline(path):
-    """Run extract -> transcribe -> chunk -> store for one file.
+    """Detect -> extract -> transcribe -> chunk -> store. Returns the WAV name."""
+    media_kind = ingest.detect_media_kind(path)
+    print(f"  Detected media kind: {media_kind}")
 
-    Returns the name of the stored media file (the .wav basename).
-    """
+    # Original source (what clips are cut from), not the transcription WAV.
+    original_file_path = ingest.original_reference(path)
+
     print("  Extracting audio...")
     audio_path = ingest.extract_audio(path)
 
@@ -59,7 +50,7 @@ def _run_pipeline(path):
     chunks = ingest.chunk_words(words)
     print(f"    {len(chunks)} chunks produced.")
 
-    stored = store.add_chunks(chunks, audio_path.name)
+    stored = store.add_chunks(chunks, audio_path.name, media_kind, original_file_path)
     print(f"  Stored {stored} chunks from '{audio_path.name}'.")
     return audio_path.name
 
@@ -83,7 +74,10 @@ def do_ingest():
         return
 
     print()
-    _run_pipeline(path)
+    try:
+        _run_pipeline(path)
+    except Exception as e:
+        print(f"  Could not process this file: {e}")
     print()
 
 
@@ -100,7 +94,7 @@ def do_ingest_folder():
         return
 
     processed = _processed_media_files()
-    # A file is already ingested if its extracted .wav name is in the index.
+    # Already ingested if its .wav name is in the index.
     pending = [p for p in files if f"{p.stem}.wav" not in processed]
 
     print(f"Found {len(files)} media file(s) in {input_dir}; "
@@ -110,12 +104,17 @@ def do_ingest_folder():
         print("Everything is already processed.\n")
         return
 
+    processed_count = 0
     for i, path in enumerate(pending, start=1):
         print(f"[{i}/{len(pending)}] {path.name}")
-        _run_pipeline(path)
+        try:
+            _run_pipeline(path)
+            processed_count += 1
+        except Exception as e:
+            print(f"  Skipped (could not process): {e}")
         print()
 
-    print(f"Done. Processed {len(pending)} new file(s).\n")
+    print(f"Done. Processed {processed_count} of {len(pending)} new file(s).\n")
 
 
 def do_ask():
@@ -138,7 +137,8 @@ def do_ask():
     for rank, hit in enumerate(results, start=1):
         time_range = f"{_fmt_ms(hit['start_ms'])}-{_fmt_ms(hit['end_ms'])}"
         print(f"[{rank}] {time_range}  ({hit['media_file']})")
-        print(f"    {hit['text']}\n")
+        print(f"    {hit['text']}")
+        print(f"    Clip [{hit['media_kind']}]: {hit['clip_path']}\n")
 
 
 def main():

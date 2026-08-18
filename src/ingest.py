@@ -1,9 +1,4 @@
-"""Ingestion pipeline.
-
-Takes raw files from data/input, normalizes them to audio in data/media,
-runs ASR to get timestamped transcripts, chunks the segments, and hands them
-to the store for embedding + indexing.
-"""
+"""Ingestion: detect kind, extract audio, and chunk the transcript."""
 
 from pathlib import Path
 
@@ -12,13 +7,51 @@ import ffmpeg
 from . import config
 
 
-def extract_audio(video_path):
-    """Extract a video's audio track to 16kHz mono WAV for ASR.
+def detect_media_kind(file_path):
+    """Return "video" or "audio" from the file's actual streams, not its name.
 
-    Writes to config.DATA_MEDIA using the input's basename with a .wav
-    extension. Skips extraction if the output already exists. Returns the
-    output path.
+    Extensions lie, so we probe the container. Embedded cover art is ignored so
+    an MP3 isn't misread as video. Raises if neither stream type is found.
     """
+    file_path = Path(file_path)
+
+    try:
+        info = ffmpeg.probe(str(file_path))
+    except ffmpeg.Error as e:
+        raise RuntimeError(f"ffprobe failed for {file_path}:\n{e.stderr.decode()}")
+
+    has_video = False
+    has_audio = False
+    for stream in info.get("streams", []):
+        codec_type = stream.get("codec_type")
+        if codec_type == "video":
+            if stream.get("disposition", {}).get("attached_pic") == 1:
+                continue  # cover art / thumbnail, not real video
+            has_video = True
+        elif codec_type == "audio":
+            has_audio = True
+
+    if has_video:
+        return config.MEDIA_KIND_VIDEO
+    if has_audio:
+        return config.MEDIA_KIND_AUDIO
+    raise ValueError(
+        f"No audio or video streams found in {file_path} — "
+        "the file may be corrupt or an unsupported format."
+    )
+
+
+def original_reference(file_path):
+    """Absolute path to the user's source file — what clips are cut from.
+
+    Kept separate from the 16kHz WAV extract_audio writes (which has no video
+    and lower quality) and carried into the stored metadata.
+    """
+    return str(Path(file_path).resolve())
+
+
+def extract_audio(video_path):
+    """Extract a 16kHz mono WAV into data/media for ASR (skips if it exists)."""
     video_path = Path(video_path)
     out_path = config.DATA_MEDIA / f"{video_path.stem}.wav"
 
@@ -34,23 +67,17 @@ def extract_audio(video_path):
             .run(capture_stdout=True, capture_stderr=True)
         )
     except ffmpeg.Error as e:
-        # ffmpeg-python swallows ffmpeg's own error text; surface it.
-        print(e.stderr.decode())
+        print(e.stderr.decode())  # ffmpeg-python otherwise swallows the message
         raise
 
     return out_path
 
 
 def chunk_words(words, window_seconds=30):
-    """Group a flat word list into consecutive fixed-length time windows.
+    """Group words into fixed ~window_seconds chunks, anchored at each chunk's
+    first word (words are never split). Placeholder for topic segmentation.
 
-    Deliberately crude: each chunk spans roughly `window_seconds`, anchored at
-    its first word. A chunk ends at the last word that *starts* before the
-    cutoff, so words are never split. To be replaced by topic segmentation
-    later.
-
-    Returns a list of:
-        {"text": str, "start_ms": int, "end_ms": int, "chunk_index": int}
+    Returns [{"text", "start_ms", "end_ms", "chunk_index"}, ...].
     """
     window_ms = window_seconds * 1000
     chunks = []
@@ -61,8 +88,7 @@ def chunk_words(words, window_seconds=30):
         if cutoff is None:
             cutoff = w["start_ms"] + window_ms
 
-        # Word starts past the window edge -> flush and open a new window.
-        if w["start_ms"] >= cutoff:
+        if w["start_ms"] >= cutoff:  # past the window edge -> new chunk
             chunks.append(_make_chunk(current, len(chunks)))
             current = []
             cutoff = w["start_ms"] + window_ms
@@ -76,7 +102,6 @@ def chunk_words(words, window_seconds=30):
 
 
 def _make_chunk(words, chunk_index):
-    """Assemble one chunk dict from a non-empty list of word dicts."""
     return {
         "text": " ".join(w["word"] for w in words),
         "start_ms": words[0]["start_ms"],

@@ -36,17 +36,18 @@ flags a missing system tool, install it (table above) and re-run `./setup.sh`.
 .venv/bin/python app.py
 ```
 
-Pick **1** to ingest a media file, then **2** to ask questions about it. That's it.
+Pick **1** to ingest a media file, then **3** to ask questions about it. That's it.
 
-See [Setup](#setup) for details and [Usage](#usage) for the scripted CLIs.
+See [Setup](#setup) for details and [Usage](#usage) for the full menu.
 
 ## How it works
 
 ```
 ingest:  video/audio ──► 16kHz WAV ──► word-level transcript ──► ~30s chunks ──► embeddings ──► Chroma
-         (ffmpeg)          (WhisperX)          (fixed window)     (Ollama)      (vector store)
+         (ffprobe/         (WhisperX          (fixed window)      (Ollama         (vector store)
+          ffmpeg)           distil-large-v3)                       mxbai-embed-large)
 
-ask:     question ──► embedding ──► nearest chunks ──► ranked results with MM:SS time ranges
+ask:     question ──► embedding ──► nearest chunks ──► ranked results (MM:SS ranges) + playable clips
 ```
 
 ## Setup
@@ -61,7 +62,7 @@ It automates everything it safely can and prints a readiness report:
 
 - creates (or reuses) the `.venv` virtualenv
 - installs the Python dependencies from `requirements.txt`
-- pulls the Ollama embedding model (`nomic-embed-text`) if Ollama is running
+- pulls the Ollama embedding model (`mxbai-embed-large`) if Ollama is running
 
 It **can't** install system-level tools for you, so if any are missing it reports
 them with the exact command to fix, then you re-run `./setup.sh`:
@@ -75,18 +76,15 @@ When the summary shows `All set`, you're ready to go.
 > **Notes**
 > - Use `.venv/bin/python` explicitly to run the app. On this machine a bare
 >   `python` resolves to the system Python, not the project venv.
-> - The first ingest run downloads the WhisperX alignment model (~360MB)
->   automatically; TLS certificates for that download are configured in
->   `src/config.py`, so no manual setup is needed.
+> - The first ingest run downloads the WhisperX transcription model
+>   (`distil-large-v3`, ~1.5GB) and the alignment model (~360MB) automatically;
+>   TLS certificates for those downloads are configured in `src/config.py`, so
+>   no manual setup is needed.
 
 ## Usage
 
-The easiest way to use the POC is the **interactive menu**. There are also two
-scripted CLIs if you prefer passing arguments directly (e.g. for automation).
-
-### Interactive menu (recommended)
-
-Start it with no arguments:
+Everything runs through one interactive program — start it with no arguments and
+follow the prompts:
 
 ```bash
 .venv/bin/python app.py
@@ -98,23 +96,30 @@ pick:
 ```
 What would you like to do?
   1) Transcribe / ingest a file
-  2) Ask a question
-  3) Quit
-Select an option [1-3]: 1
-Path to the video/audio file: data/input/your_file.mp4
+  2) Process new files in data/input
+  3) Ask a question
+  4) Quit
+Select an option [1-4]: 1
+Path to the video/audio file (any location on your system): data/input/your_file.mp4
 
-Extracting audio...
-Transcribing (first run downloads the model and is slow)...
-  42 words transcribed.
-  3 chunks produced.
-
-Stored 3 chunks from 'your_file.wav' in the index.
+  Detected media kind: video
+  Extracting audio...
+  Transcribing (first run downloads the model and is slow)...
+    42 words transcribed.
+    3 chunks produced.
+  Stored 3 chunks from 'your_file.wav'.
 ```
 
-Then choose option 2 to search:
+- **Option 1** ingests a single file — paste any full path on your system. The
+  file's type (video vs. audio) is detected from its actual contents, not its
+  extension, so a misnamed or corrupt file is caught up front.
+- **Option 2** scans `data/input` and ingests every file that isn't already
+  indexed (a quick way to process a folder of downloads).
+
+Then choose **option 3** to search:
 
 ```
-Select an option [1-3]: 2
+Select an option [1-4]: 3
 Your question: what did they say about gold?
 How many results? [3]:
 
@@ -122,30 +127,27 @@ Results for: "what did they say about gold?"
 
 [1] 00:08-00:12  (your_file.wav)
     Gold prices surged to record highs as investors sought safe haven assets
-
-[2] 00:12-00:16  (your_file.wav)
-    amid market uncertainty. Management raised full-year guidance and announced
 ```
 
-The menu loops until you choose **3** (or type `q`). If nothing matches, it prints
+Each search also cuts a short playable clip for every result into `data/clips`.
+The menu loops until you choose **4** (or type `q`). If nothing matches, it prints
 `No matches found.`
 
 ## Project layout
 
 ```
 setup.sh           One-shot environment setup + readiness check
-app.py             Interactive menu: ingest a file or ask a question
-run_ingest.py      Scripted CLI: ingest a media file end to end
-ask.py             Scripted CLI: search the index by question
+app.py             The app: interactive menu for ingesting files and asking questions
 src/
   config.py        Paths, model names, toggle flags, TLS setup
   models.py        Model wrappers: asr() (WhisperX), embed() (Ollama)
-  ingest.py        extract_audio(), chunk_words()
+  ingest.py        detect_media_kind(), extract_audio(), chunk_words()
   store.py         ChromaDB persistent store: add_chunks(), search()
-  query.py         ask() — question search entry point
-  clip.py          (not yet implemented) cut playable clips from results
+  query.py         ask() — searches the index and cuts a clip per result
+  clip.py          cut_clip(), clear_clips_folder() — playable clips from results
 data/
   input/           source video/audio files
   media/           extracted WAVs + cached transcripts
+  clips/           short clips cut around each search hit
 db/chroma/         persistent vector store
 ```
