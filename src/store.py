@@ -13,6 +13,12 @@ _collection = _client.get_or_create_collection(
 )
 
 
+def _embedding_text(chunk):
+    """Contextual document text for embedding: title + summary + transcript."""
+    parts = [chunk.get("title", ""), chunk.get("summary", ""), chunk["text"]]
+    return "\n".join(p for p in parts if p)
+
+
 def add_chunks(chunks, media_file, media_kind, original_file_path):
     """Embed and store a file's chunks, replacing any prior rows for that file.
 
@@ -26,20 +32,25 @@ def add_chunks(chunks, media_file, media_kind, original_file_path):
     if not chunks:
         return 0
 
-    ids = [f"{basename}_{c['chunk_index']}" for c in chunks]
-    documents = [c["text"] for c in chunks]
-    embeddings = models.embed(documents)
+    ids = [f"{basename}_{i}" for i in range(len(chunks))]
+    documents = [c["text"] for c in chunks]  # raw transcript: shown, clip-cut
+    # Contextual retrieval: embed title + summary + transcript so the topical
+    # label contributes to matching, not just the raw words.
+    embeddings = models.embed([_embedding_text(c) for c in chunks])
+    # title/summary come from segment.build_segments; absent for plain chunks.
     metadatas = [
         {
             "text": c["text"],
             "start_ms": c["start_ms"],
             "end_ms": c["end_ms"],
             "media_file": media_file,
-            "chunk_index": c["chunk_index"],
+            "chunk_index": i,
             "media_kind": media_kind,
             "original_file_path": original_file_path,
+            "title": c.get("title", ""),
+            "summary": c.get("summary", ""),
         }
-        for c in chunks
+        for i, c in enumerate(chunks)
     ]
 
     _collection.add(

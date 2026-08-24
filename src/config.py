@@ -29,7 +29,7 @@ WHISPER_MODEL = "distil-large-v3"
 EMBED_MODEL = "mxbai-embed-large"
 EMBED_QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 
-# Not wired up yet (models.llm/vision raise). Sized for 8GB; pull before use:
+# Vision not wired up yet (models.vision raises). Pull before use:
 #   ollama pull llama3.2:3b        ollama pull moondream
 LLM_MODEL = "llama3.2:3b"
 VISION_MODEL = "moondream"
@@ -37,6 +37,27 @@ VISION_MODEL = "moondream"
 # Shared by ingest.detect_media_kind() and the stored metadata.
 MEDIA_KIND_VIDEO = "video"
 MEDIA_KIND_AUDIO = "audio"
+
+# Below this cosine similarity, consecutive sentences are treated as a topic
+# shift. Reserved for tier-2 coarse pre-segmentation; needs tuning.
+SIMILARITY_THRESHOLD = 0.5
+
+# Segments shorter than this are merged into a neighbour (segment.
+# merge_short_segments) — also curbs the small model's tendency to over-split a
+# topic into tiny fragments. No maximum: length follows coherence, not time.
+MIN_SEGMENT_SECONDS = 15
+
+# Two-stage retrieval: pull this many candidates by embedding, then the LLM
+# re-ranks them down to the requested number (query._rerank).
+RERANK_CANDIDATES = 10
+
+# Context budget for one-pass (tier-1) topic segmentation, sized to the LOCAL
+# model. num_ctx is what we ask Ollama to allocate; llama3.2:3b handles 8192
+# comfortably on 8GB. Bump this up with bigger models (e.g. a hosted Sonnet's
+# ~200K) so tier-1 covers longer transcripts before the tier-2 split kicks in.
+MODEL_CONTEXT_TOKENS = 8192
+# Transcript budget only — leave headroom for the prompt scaffold and response.
+SAFE_CONTEXT_TOKENS = int(MODEL_CONTEXT_TOKENS * 0.6)
 
 # --- Toggles / endpoints / compute -------------------------------------------
 USE_LOCAL_ASR = True

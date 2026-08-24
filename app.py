@@ -5,7 +5,7 @@
 
 from pathlib import Path
 
-from src import config, ingest, models, query, store
+from src import config, ingest, models, query, segment, store
 
 # Extensions the folder scanner picks up from data/input.
 MEDIA_EXTENSIONS = {
@@ -33,7 +33,7 @@ def _clean_path(raw):
 
 
 def _run_pipeline(path):
-    """Detect -> extract -> transcribe -> chunk -> store. Returns the WAV name."""
+    """Detect -> extract -> transcribe -> segment -> store. Returns the WAV name."""
     media_kind = ingest.detect_media_kind(path)
     print(f"  Detected media kind: {media_kind}")
 
@@ -47,11 +47,15 @@ def _run_pipeline(path):
     words = models.asr(audio_path)
     print(f"    {len(words)} words transcribed.")
 
-    chunks = ingest.chunk_words(words)
-    print(f"    {len(chunks)} chunks produced.")
+    print("  Segmenting into topics...")
+    segments = segment.build_segments(words)
+    print(f"    {len(segments)} segments produced:")
+    for i, seg in enumerate(segments, start=1):
+        time_range = f"{_fmt_ms(seg['start_ms'])}-{_fmt_ms(seg['end_ms'])}"
+        print(f"      [{i}] {time_range}  {seg['title']}")
 
-    stored = store.add_chunks(chunks, audio_path.name, media_kind, original_file_path)
-    print(f"  Stored {stored} chunks from '{audio_path.name}'.")
+    stored = store.add_chunks(segments, audio_path.name, media_kind, original_file_path)
+    print(f"  Stored {stored} segments from '{audio_path.name}'.")
     return audio_path.name
 
 

@@ -92,9 +92,34 @@ def embed(texts, is_query=False):
     return vectors
 
 
-def llm(prompt):
-    """Generate text from the local LLM. Wired up later."""
-    raise NotImplementedError
+def llm(prompt, model=None, format=None, temperature=None):
+    """Generate a text reply from the local LLM via Ollama. Requires `ollama serve`.
+
+    format: optional JSON schema (dict) or "json" to constrain output to valid
+    JSON — needed for reliable structured output from small local models.
+    temperature: optional decoding temperature (0 = deterministic).
+    """
+    import ollama
+
+    model = model or config.LLM_MODEL
+    # Ollama defaults num_ctx to 2048 and silently truncates; request the
+    # configured budget so full transcripts actually fit.
+    options = {"num_ctx": config.MODEL_CONTEXT_TOKENS}
+    if temperature is not None:
+        options["temperature"] = temperature
+    try:
+        response = ollama.chat(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            format=format,
+            options=options,
+        )
+    except Exception as e:
+        raise RuntimeError(
+            f"Ollama chat call failed for model '{model}' "
+            f"(is `ollama serve` running on {config.OLLAMA_HOST}?): {e}"
+        ) from e
+    return response["message"]["content"]
 
 
 def vision(image_path, prompt):
