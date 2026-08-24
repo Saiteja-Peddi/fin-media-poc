@@ -322,6 +322,14 @@ def _relabel(text):
     return (title, summary) if title else None
 
 
+def label_span(text):
+    """Public: (title, summary) for a merged span, or None on failure.
+
+    Used by the query layer to label a clip stitched from several segments.
+    """
+    return _relabel(text)
+
+
 def merge_short_segments(segments):
     """Fold sub-minimum segments into a neighbour (a light guardrail only).
 

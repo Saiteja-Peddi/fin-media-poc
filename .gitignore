@@ -27,5 +27,8 @@ db/chroma/*
 .idea/
 .vscode/
 
+# --- Local dev tools (DB viewer, not part of the project) -----------------
+tools/
+
 # --- Claude Code (tooling, not part of the project) -----------------------
 .claude

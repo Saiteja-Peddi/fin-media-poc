@@ -131,7 +131,14 @@ def do_ask():
     k_raw = input("How many results? [3]: ").strip()
     n_results = int(k_raw) if k_raw.isdigit() and int(k_raw) > 0 else 3
 
-    results = query.ask(question, n_results=n_results)
+    # Merge lets one result cover several topics from the SAME source video.
+    merge_map = {"1": query.MERGE_NONE, "2": query.MERGE_ADJACENT, "3": query.MERGE_PARENT}
+    m_raw = input(
+        "Merge same-video clips? [1] none  [2] adjacent topics  [3] all matches: "
+    ).strip()
+    merge = merge_map.get(m_raw, query.MERGE_NONE)
+
+    results = query.ask(question, n_results=n_results, merge=merge)
 
     if not results:
         print("\nNo matches found.\n")
