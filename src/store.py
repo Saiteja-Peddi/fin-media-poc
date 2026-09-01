@@ -49,6 +49,9 @@ def add_chunks(chunks, media_file, media_kind, original_file_path):
             "original_file_path": original_file_path,
             "title": c.get("title", ""),
             "summary": c.get("summary", ""),
+            # Chroma rejects None metadata, so an uncertain (None) speaker is
+            # stored as "" — same empty-string convention as title/summary.
+            "speaker_id": c.get("speaker_id") or "",
         }
         for i, c in enumerate(chunks)
     ]

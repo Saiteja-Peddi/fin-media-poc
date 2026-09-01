@@ -27,6 +27,11 @@ db/chroma/*
 .idea/
 .vscode/
 
+# --- Secrets --------------------------------------------------------------
+# Ignore the real .env; keep the tracked template .env.example.
+.env
+!.env.example
+
 # --- Local dev tools (DB viewer, not part of the project) -----------------
 tools/
 

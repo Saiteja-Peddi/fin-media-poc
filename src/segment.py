@@ -10,6 +10,7 @@ the LLM. The embedding helpers below are kept for that tier-2 coarse pass.
 import json
 import math
 import re
+from collections import Counter
 
 from . import config, models
 
@@ -22,8 +23,10 @@ def build_sentences(words):
     Heuristic: split after any word ending in ".", "!", or "?". No abbreviation
     handling ("Inc." / "U.S." over-split) — good enough as a base unit.
 
-    words: [{"word", "start_ms", "end_ms"}, ...] from models.asr().
-    Returns [{"text", "start_ms", "end_ms", "word_count"}, ...] in order.
+    words: [{"word", "start_ms", "end_ms", "speaker"?}, ...] from models.asr()
+    (the "speaker" field is present once diarization has tagged the words).
+    Returns [{"text", "start_ms", "end_ms", "word_count", "speaker"}, ...] in
+    order.
     """
     sentences = []
     current = []
@@ -47,7 +50,22 @@ def _make_sentence(words):
         "start_ms": words[0]["start_ms"],
         "end_ms": words[-1]["end_ms"],
         "word_count": len(words),
+        "speaker": _sentence_speaker(words),
     }
+
+
+def _sentence_speaker(words):
+    """Speaker for a sentence: its first word's speaker, else the most common
+    non-None one. None only when every word is unassigned (or untagged, e.g. a
+    pre-diarization transcript)."""
+    first = words[0].get("speaker")
+    if first is not None:
+        return first
+
+    speakers = [s for w in words if (s := w.get("speaker")) is not None]
+    if not speakers:
+        return None
+    return Counter(speakers).most_common(1)[0][0]
 
 
 # --- Embedding helpers (reserved for the tier-2 coarse pre-segmentation) -----
@@ -96,6 +114,29 @@ def detect_candidate_boundaries(sentences):
     ]
 
 
+def get_speaker_boundaries(sentences):
+    """Sentence indices where a speaker change forces a HARD segment boundary.
+
+    Index i means sentence i starts a new segment (its known speaker differs
+    from the last known one) — non-negotiable and enforced after the LLM runs,
+    unlike detect_candidate_boundaries' adjustable suggestions. speaker=None is
+    uncertainty, not a new person: it never creates a boundary and is compared
+    against the last KNOWN speaker (so S0, None, S1 splits before S1).
+
+    Returns a set of sentence indices (each in 1..len(sentences)-1).
+    """
+    boundaries = set()
+    prev_known = None
+    for i, s in enumerate(sentences):
+        speaker = s.get("speaker")
+        if speaker is None:
+            continue  # uncertain tag: neither starts nor breaks a boundary
+        if prev_known is not None and speaker != prev_known:
+            boundaries.add(i)  # sentence i starts a new segment
+        prev_known = speaker
+    return boundaries
+
+
 # Structured-output schema: forces small local models to emit valid JSON.
 _SEGMENT_SCHEMA = {
     "type": "object",
@@ -120,8 +161,39 @@ _SEGMENT_SCHEMA = {
 }
 
 
-def _build_segment_prompt(sentences):
-    """Numbered transcript -> LLM topic-segmentation prompt."""
+def _boundary_hints(candidate_indices, hard_boundary_indices):
+    """Render the CANDIDATE/REQUIRED boundary hint block for the prompt.
+
+    Both index sets use the "new segment starts AT this sentence number"
+    convention. Returns an empty string when there are no hints at all.
+    """
+    candidates = sorted(candidate_indices or [])
+    required = sorted(hard_boundary_indices or [])
+    if not candidates and not required:
+        return ""
+
+    required_str = ", ".join(map(str, required)) if required else "none"
+    candidate_str = ", ".join(map(str, candidates)) if candidates else "none"
+    return (
+        "BOUNDARY HINTS (sentence numbers where a new segment may or must "
+        "start):\n"
+        f"- REQUIRED (speaker changes): {required_str}. A new segment MUST start "
+        "at each of these sentence numbers. The sentence before it and the "
+        "sentence at it are spoken by different people and must NEVER share a "
+        "segment. Respect these exactly.\n"
+        f"- CANDIDATE (possible topic shifts): {candidate_str}. These are only "
+        "hints. Use your judgment: confirm one, shift it by a sentence or two, "
+        "or ignore it entirely based on the actual topic flow.\n\n"
+    )
+
+
+def _build_segment_prompt(sentences, candidate_indices=None, hard_boundary_indices=None):
+    """Numbered transcript -> LLM topic-segmentation prompt.
+
+    candidate_indices / hard_boundary_indices are sentence numbers where a new
+    segment may (candidate) or must (required/speaker-change) start; both are
+    surfaced to the model, clearly distinguished.
+    """
     last_idx = len(sentences) - 1
     transcript = "\n".join(f"{i}: {s['text']}" for i, s in enumerate(sentences))
 
@@ -131,13 +203,15 @@ def _build_segment_prompt(sentences):
         "search and chaptering.\n\n"
         f"The transcript below has {len(sentences)} sentences, numbered 0 to "
         f"{last_idx}, one per line.\n\n"
+        + _boundary_hints(candidate_indices, hard_boundary_indices) +
         "TASK: group consecutive sentences into topic segments. Each segment is "
         "a single, self-contained topic or subtopic that reads sensibly on its "
         "own.\n\n"
         "RULES:\n"
         "1. Put a boundary ONLY at a genuine topic shift — a new asset class, "
-        "theme, question, or section. Never break in the middle of a thought, "
-        "explanation, example, or list.\n"
+        "theme, question, or section — OR wherever a REQUIRED boundary above "
+        "demands one. Never break in the middle of a thought, explanation, "
+        "example, or list (except where a REQUIRED boundary falls).\n"
         f"2. Segments must be contiguous, ordered, and cover every sentence "
         f"exactly once: the first starts at index 0; each later segment's "
         f"start_sentence_idx equals the previous segment's end_sentence_idx + 1; "
@@ -233,20 +307,50 @@ def _repair_coverage(raw_segments, n_sentences):
     return repaired
 
 
-def llm_segment(sentences):
+def _enforce_hard_boundaries(segments, hard_boundary_indices):
+    """Split any segment that straddles a REQUIRED (speaker-change) boundary.
+
+    Overrides the LLM's grouping so no output segment holds a speaker change in
+    its interior. Contiguity/coverage preserved; titles/summaries are duplicated
+    across a split (final labels are regenerated downstream anyway).
+    """
+    if not hard_boundary_indices:
+        return segments
+
+    result = []
+    for seg in segments:
+        start = seg["start_sentence_idx"]
+        end = seg["end_sentence_idx"]
+        # Cut points strictly inside the segment: a boundary at b means b begins
+        # a new segment, so it's interior when start < b <= end.
+        cuts = sorted(b for b in hard_boundary_indices if start < b <= end)
+        prev = start
+        for b in cuts:
+            result.append({**seg, "start_sentence_idx": prev, "end_sentence_idx": b - 1})
+            prev = b
+        result.append({**seg, "start_sentence_idx": prev, "end_sentence_idx": end})
+    return result
+
+
+def llm_segment(sentences, candidate_indices=None, hard_boundary_indices=None):
     """Segment a numbered sentence list into titled topics with one LLM call.
 
     The whole transcript goes in one pass (caller ensures it fits the context
     budget). A JSON schema constrains the output; one retry then a raise guards
-    against a stray unparseable reply. A deterministic repair pass then
-    guarantees contiguous, non-overlapping coverage regardless of the model.
+    against a stray unparseable reply, and a deterministic repair pass then
+    guarantees contiguous, non-overlapping coverage.
 
-    Returns [{"text", "start_ms", "end_ms", "title", "summary"}, ...] in order.
+    candidate_indices (topic-shift hints) are adjustable suggestions;
+    hard_boundary_indices (speaker changes) are both passed as requirements AND
+    enforced after parsing, so the LLM can never merge two speakers.
+
+    Returns [{"text", "start_ms", "end_ms", "title", "summary", "speaker"}, ...]
+    in order.
     """
     if not sentences:
         return []
 
-    prompt = _build_segment_prompt(sentences)
+    prompt = _build_segment_prompt(sentences, candidate_indices, hard_boundary_indices)
     raw = models.llm(prompt, format=_SEGMENT_SCHEMA, temperature=0)
     try:
         segments = _parse_segments_json(raw)
@@ -260,31 +364,54 @@ def llm_segment(sentences):
             ) from e
 
     segments = _repair_coverage(segments, len(sentences))
+    # Speaker changes are non-negotiable: split anything the LLM left straddling.
+    segments = _enforce_hard_boundaries(segments, hard_boundary_indices)
     result = []
     for seg in segments:
         start = seg["start_sentence_idx"]
         end = seg["end_sentence_idx"]
+        span = sentences[start:end + 1]
         result.append(
             {
-                "text": " ".join(s["text"] for s in sentences[start:end + 1]),
+                "text": " ".join(s["text"] for s in span),
                 "start_ms": sentences[start]["start_ms"],
                 "end_ms": sentences[end]["end_ms"],
                 "title": seg["title"],
                 "summary": seg["summary"],
+                # Single-speaker after enforcement; carried so merging can't
+                # later fold two speakers together.
+                "speaker": _sentence_speaker(span),
             }
         )
     return result
 
 
 def _combine(first, second, keep):
-    """Merge two adjacent segments; `keep` supplies the title/summary."""
+    """Merge two adjacent segments; `keep` supplies the title/summary.
+
+    Only called for speaker-compatible pairs (see _mergeable), so the combined
+    speaker is simply whichever side is known (or None if both are).
+    """
+    first_speaker = first.get("speaker")
     return {
         "text": f"{first['text']} {second['text']}",
         "start_ms": first["start_ms"],
         "end_ms": second["end_ms"],
         "title": keep["title"],
         "summary": keep["summary"],
+        "speaker": first_speaker if first_speaker is not None else second.get("speaker"),
     }
+
+
+def _mergeable(a, b):
+    """True unless merging a and b would mix two different known speakers.
+
+    A speaker change is a hard boundary, so segments on opposite sides of one are
+    never merged. An unknown (None) speaker is compatible with anything — an
+    uncertain tag shouldn't block an otherwise valid length merge.
+    """
+    sa, sb = a.get("speaker"), b.get("speaker")
+    return sa is None or sb is None or sa == sb
 
 
 # Title/summary regeneration for merged segments (structured output).
@@ -333,10 +460,11 @@ def label_span(text):
 def merge_short_segments(segments):
     """Fold sub-minimum segments into a neighbour (a light guardrail only).
 
-    A short segment merges into the following one; a trailing short segment
-    merges into the previous one. No maximum bound — length follows topic
-    coherence, not the clock. Prints the merge count. Titles are refreshed
-    afterwards by _label_segments, so surviving-title choice here doesn't stick.
+    A short segment merges into the following one; a trailing short one merges
+    into the previous. No maximum bound — length follows topic coherence, not
+    the clock. Never merges across a speaker change: a short segment that can't
+    merge without mixing two known speakers stays standalone. Titles are
+    refreshed afterwards by _label_segments, so the surviving title doesn't stick.
     """
     if not segments:
         return []
@@ -349,18 +477,21 @@ def merge_short_segments(segments):
     for seg in segments:
         cur = dict(seg)
         if pending is not None:
-            cur = _combine(pending, cur, keep=cur)  # following segment survives
-            merges += 1
+            if _mergeable(pending, cur):
+                cur = _combine(pending, cur, keep=cur)  # following segment survives
+                merges += 1
+            else:  # speaker boundary: keep the short segment on its own
+                merged.append(pending)
             pending = None
         if (cur["end_ms"] - cur["start_ms"]) < min_ms:
             pending = cur
         else:
             merged.append(cur)
     if pending is not None:
-        if merged:  # trailing short segment: fold into the previous one
+        if merged and _mergeable(merged[-1], pending):  # fold into previous one
             merged[-1] = _combine(merged[-1], pending, keep=merged[-1])
             merges += 1
-        else:  # a single short segment with nothing to merge into
+        else:  # nothing to merge into, or doing so would cross a speaker boundary
             merged.append(pending)
 
     print(f"merge_short_segments: {merges} merge(s)")
@@ -381,6 +512,31 @@ def _label_segments(segments):
             seg["title"], seg["summary"] = new_label
             relabelled += 1
     print(f"_label_segments: {relabelled}/{len(segments)} labelled")
+    return segments
+
+
+def _assign_speaker_ids(segments, sentences):
+    """Stamp each segment with a final speaker_id, verifying the invariant.
+
+    Re-derives the speaker from the sentences a segment covers (matched by time)
+    and ASSERTS they agree — a mismatch means enforcement is broken and we want a
+    loud failure over a silently mislabelled clip. speaker_id is None when the
+    whole segment was diarization-uncertain (no guessing).
+    """
+    for seg in segments:
+        covered = [
+            s for s in sentences
+            if s["start_ms"] >= seg["start_ms"] and s["end_ms"] <= seg["end_ms"]
+        ]
+        speakers = {s["speaker"] for s in covered if s.get("speaker") is not None}
+        if len(speakers) > 1:
+            raise AssertionError(
+                f"Segment [{seg['start_ms']}..{seg['end_ms']}] '{seg.get('title')}' "
+                f"mixes speakers {sorted(speakers)} — hard-boundary enforcement "
+                f"(get_speaker_boundaries/_enforce_hard_boundaries) failed to "
+                f"split on a speaker change."
+            )
+        seg["speaker_id"] = speakers.pop() if speakers else None
     return segments
 
 
@@ -409,9 +565,17 @@ def build_segments(words):
             f"is not implemented yet."
         )
 
-    segments = llm_segment(sentences)          # boundaries + draft labels
-    segments = merge_short_segments(segments)  # length guardrail
-    return _label_segments(segments)           # final labels from final text
+    # Two boundary sources: adjustable topic-shift candidates (embeddings) and
+    # non-negotiable speaker changes. detect_candidate_boundaries returns the
+    # index BEFORE which the shift sits, so +1 converts to a start-of-segment
+    # index, matching get_speaker_boundaries' convention.
+    candidate_indices = {i + 1 for i in detect_candidate_boundaries(sentences)}
+    hard_boundaries = get_speaker_boundaries(sentences)
+
+    segments = llm_segment(sentences, candidate_indices, hard_boundaries)  # + labels
+    segments = merge_short_segments(segments)  # length guardrail (speaker-aware)
+    segments = _label_segments(segments)       # final labels from final text
+    return _assign_speaker_ids(segments, sentences)  # speaker_id + invariant check
 
 
 if __name__ == "__main__":
@@ -430,6 +594,13 @@ if __name__ == "__main__":
         latest = caches[-1]
         with open(latest) as f:
             words = json.load(f)
+
+        sentences = build_sentences(words)
+        print(f"\n{latest.name}: {len(words)} words -> {len(sentences)} sentences\n")
+        for i, s in enumerate(sentences, start=1):
+            time_range = f"{_fmt_ms(s['start_ms'])}-{_fmt_ms(s['end_ms'])}"
+            speaker = s["speaker"] or "—"
+            print(f"[{i}] {time_range}  ({speaker})  {s['text']}")
 
         segments = build_segments(words)
         print(f"\n{latest.name}: {len(words)} words -> {len(segments)} segments\n")

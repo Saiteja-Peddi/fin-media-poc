@@ -1,4 +1,5 @@
 certifi
+python-dotenv
 ffmpeg-python
 whisperx
 ollama

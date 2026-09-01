@@ -67,6 +67,71 @@ def asr(audio_path):
     return words
 
 
+@lru_cache(maxsize=1)
+def _diarize_pipeline(device):
+    """Load WhisperX's diarization pipeline once per process (kept separate from
+    diarize() so the slow model load is cached and the token check runs first)."""
+    from whisperx.diarize import DiarizationPipeline
+
+    # WhisperX renamed this kwarg from use_auth_token -> token, and its default
+    # model is now the separately-gated community-1; pin the model we document.
+    return DiarizationPipeline(
+        model_name=config.DIARIZATION_MODEL, token=config.HF_TOKEN, device=device
+    )
+
+
+def diarize(audio_path, device="cpu"):
+    """Run speaker diarization ("who spoke when") over an audio file.
+
+    Returns WhisperX's DataFrame (start/end/speaker) unreshaped, for
+    assign_speakers_to_words(). Needs an HF token for the gated pyannote models;
+    raises a setup-pointing error rather than a raw stack trace when it's missing.
+    """
+    if not config.HF_TOKEN:
+        raise RuntimeError(
+            "Speaker diarization needs a HuggingFace token, but HF_TOKEN is empty.\n"
+            "  1. Copy .env.example to .env and paste a Read-role token.\n"
+            "  2. Accept the licences for pyannote/speaker-diarization-3.1 and\n"
+            "     pyannote/segmentation-3.0 (see .env.example for the links).\n"
+            "To run without diarization, set ENABLE_DIARIZATION = False in "
+            "src/config.py."
+        )
+
+    import whisperx
+
+    pipeline = _diarize_pipeline(device)
+    audio = whisperx.load_audio(str(audio_path))
+    return pipeline(audio)
+
+
+def assign_speakers_to_words(words, diarize_result):
+    """Tag each word with the speaker who said it, using diarize() output.
+
+    Returns a new copy of the flat word list where every word also carries a
+    "speaker" field (e.g. "SPEAKER_00"); words WhisperX can't confidently assign
+    get speaker=None rather than a guess.
+    """
+    import whisperx
+
+    # assign_word_speakers works on whisperx's own shape (segments of words with
+    # second-based start/end), so adapt our flat ms list, tag in place, read back.
+    wx_words = [
+        {
+            "word": w["word"],
+            "start": w["start_ms"] / 1000,
+            "end": w["end_ms"] / 1000,
+        }
+        for w in words
+    ]
+    transcript = {"segments": [{"words": wx_words}], "word_segments": wx_words}
+    whisperx.assign_word_speakers(diarize_result, transcript)
+
+    return [
+        {**w, "speaker": wx.get("speaker")}
+        for w, wx in zip(words, wx_words)
+    ]
+
+
 def embed(texts, is_query=False):
     """Embed strings via Ollama (one call each). Requires `ollama serve`.
 

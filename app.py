@@ -47,6 +47,13 @@ def _run_pipeline(path):
     words = models.asr(audio_path)
     print(f"    {len(words)} words transcribed.")
 
+    if config.ENABLE_DIARIZATION:
+        print("  Diarizing (identifying speakers)...")
+        diarize_result = models.diarize(audio_path, device=config.DEVICE)
+        words = models.assign_speakers_to_words(words, diarize_result)
+        speakers = {w["speaker"] for w in words if w["speaker"] is not None}
+        print(f"    {len(speakers)} distinct speaker(s) detected.")
+
     print("  Segmenting into topics...")
     segments = segment.build_segments(words)
     print(f"    {len(segments)} segments produced:")
@@ -147,7 +154,9 @@ def do_ask():
     print(f'\nResults for: "{question}"\n')
     for rank, hit in enumerate(results, start=1):
         time_range = f"{_fmt_ms(hit['start_ms'])}-{_fmt_ms(hit['end_ms'])}"
+        speaker = hit.get("speaker_id") or "unknown"
         print(f"[{rank}] {time_range}  ({hit['media_file']})")
+        print(f"    Speaker: {speaker}")
         print(f"    {hit['text']}")
         print(f"    Clip [{hit['media_kind']}]: {hit['clip_path']}\n")
 

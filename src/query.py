@@ -151,6 +151,9 @@ def _group_result(members, spans):
         label = segment.label_span(combined)
         if label:
             result["title"], result["summary"] = label
+        # A merged clip may span several speakers; show all distinct ones.
+        speakers = sorted({m.get("speaker_id", "") for m in members if m.get("speaker_id")})
+        result["speaker_id"] = ", ".join(speakers)
     return result
 
 

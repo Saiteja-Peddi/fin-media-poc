@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 
 import certifi
+from dotenv import load_dotenv
 
 # macOS python.org builds lack a usable CA bundle, so model downloads fail with
 # CERTIFICATE_VERIFY_FAILED; point TLS at certifi's bundle unless already set.
@@ -12,6 +13,11 @@ os.environ.setdefault("SSL_CERT_DIR", str(Path(certifi.where()).parent))
 
 # --- Paths (created on import so the rest of the code can assume they exist) --
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+# Load secrets from the repo-root .env (copied from .env.example) into the
+# environment; never commit .env. Nothing overrides already-set env vars.
+load_dotenv(PROJECT_ROOT / ".env")
+
 DATA_INPUT = PROJECT_ROOT / "data" / "input"   # user's source files
 DATA_MEDIA = PROJECT_ROOT / "data" / "media"   # extracted WAVs + transcripts
 DATA_CLIPS = PROJECT_ROOT / "data" / "clips"   # clips cut around search hits
@@ -33,6 +39,18 @@ EMBED_QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 #   ollama pull llama3.2:3b        ollama pull moondream
 LLM_MODEL = "llama3.2:3b"
 VISION_MODEL = "moondream"
+
+# HuggingFace READ token for speaker diarization (gated pyannote models). Read
+# from .env; empty means diarization is disabled and the rest runs local-only.
+HF_TOKEN = os.environ.get("HF_TOKEN", "")
+
+# Master switch: turn off to skip diarization and fall back to plain
+# transcription (e.g. when no HF token is set up), without removing any code.
+ENABLE_DIARIZATION = True
+
+# Pinned because newer WhisperX defaults to the separately-gated community-1.
+# We target 3.1 — the model .env.example tells users to accept.
+DIARIZATION_MODEL = "pyannote/speaker-diarization-3.1"
 
 # Shared by ingest.detect_media_kind() and the stored metadata.
 MEDIA_KIND_VIDEO = "video"
